@@ -1,0 +1,197 @@
+## - Turn Data into Dx30 Feature Frames ("Images") and Create Labels
+## - Step Size = 1 week
+## - Label = linear degradation
+
+import pandas as pd
+import numpy as np
+import os
+from sklearn import preprocessing
+import pickle
+from datetime import timedelta
+import matplotlib.pyplot as plt
+import random
+from sklearn.utils import shuffle
+
+#hyper-params
+shift_size = 7
+cycle_size = 30
+
+#Initialize inputs/Targets
+Train_Inputs = []
+Train_Targets = []
+Valid_Inputs = []
+Valid_Targets = []
+Test_Inputs = []
+Test_Targets = []
+
+#Load bearing ID table
+bearing_id_table = pd.read_csv('D:\hearing_dates.csv')
+
+#Define loop through directories
+dir_name = 'D:\\NewStructure'
+bearing_id_folders = os.listdir(dir_name)
+
+#for every bearing ID
+example_counter = 0
+for bearing_id_idx in range(len(bearing_id_folders)):
+    
+    bearing_id = bearing_id_folders[bearing_id_idx]
+    #import data
+    mean_data_filename = dir_name + '\\' + bearing_id + '\\mean'
+    #print(mean_data_filename)
+    test_data_mean_in = pd.read_hdf(mean_data_filename,'table')
+
+    #remove 4 bearing columns and aircraft ID column (also getting rid of binary variable for now cuz its annoying)
+    bool_keep = [True]*26
+    bool_keep[0] = False  #aircraft id
+    bool_keep[24] = False #annoying boolean Weight on Wheels variable
+    test_data_mean = test_data_mean_in.iloc[:,bool_keep]
+
+    #reformat averaged data
+    yearly_data = []
+    yearly_labels = []
+    beg_date = test_data_mean.index[0]
+    
+    #removal date
+    removal_date_str = bearing_id_table.loc[int(bearing_id)].loc['Removal Date']
+    removal_date = pd.to_datetime(removal_date_str,yearfirst=False,dayfirst=False)
+    
+    #failure mode
+    failure_mode = bearing_id_table.loc[int(bearing_id)].loc['Failure Mode']
+    
+    #reindex to 1-day frequency (fill in missing days), and interpolate missing info
+    data_index2 = pd.date_range(start = beg_date,
+                                end = removal_date,
+                                freq = '1D')
+    reindexed_data = test_data_mean.reindex(data_index2,method='bfill')
+    interpolated_reindexed = reindexed_data.resample('D').interpolate('linear')
+    interp_reindexed_fillna = interpolated_reindexed.fillna(axis=1,method='bfill')
+    new_mean_data = interp_reindexed_fillna
+    
+    #create a linear degradation function that represents cumalative prob of failure (from 0 to 1)
+    numDays = new_mean_data.shape[0]
+    if (failure_mode == 'Retirement'):
+        stepDays = numDays/2
+    else:
+        stepDays = numDays
+    step = 1/float(stepDays)
+    HealthIndex = [i*step for i in range(numDays)]
+    #plt.plot(HealthIndex_Linear)
+    #plt.show()
+    
+    #loop through data until break.  create a new 30-sample example every iteration
+    while (beg_date < removal_date):
+        
+        #Get end date
+        end_date = beg_date + timedelta(days=cycle_size)
+        
+        #print(beg_date,end_date)
+
+        #get data for this year
+        mask = (new_mean_data.index > beg_date) & (new_mean_data.index <= end_date)
+        this_slice_data = new_mean_data.loc[mask]
+        
+        #If end date after removal date, add in missing info for time gap
+        if(end_date > removal_date):
+            data_index3 = pd.date_range(start = beg_date,
+                                        end = end_date-timedelta(days=1),
+                                        freq = '1D')
+            this_slice_data = this_slice_data.reindex(data_index3,method='bfill')
+            
+        #if NaN values still exist, set to 0
+        this_slice_data = this_slice_data.fillna(value=0)
+        
+        #Check if null values still exist
+        if (this_slice_data.isnull().values.any()):
+            print('Null Values Still Exist!!')
+            #print(interp_reindexed_fillna)
+        
+        #Make all data zero-mean and unit variance
+        data_scaled = pd.DataFrame(data=preprocessing.scale(this_slice_data),
+                                   index=this_slice_data.index)
+                                  #columns = interp_reindexed_fillna.columns)
+        
+        #Add zeros to dates after break date
+        #if (end_date > removal_date):
+        #    data_scaled[data_scaled.index >= removal_date] = 0
+        
+        ############### - Split into Train/Valid/Test - #################
+        
+        #Randomize into dataset
+        rand_num = random.random()
+        if (rand_num < .8):
+            data_set = 'train'
+        elif (rand_num < .9):
+            data_set = 'valid'
+        else:
+            data_set = 'test'
+     
+        #Calculate target RUL
+        if (end_date < removal_date):
+            end_idx = [i for i,x in enumerate(new_mean_data.index) if x==end_date]
+        else:
+            end_idx = [i for i,x in enumerate(new_mean_data.index) if x==removal_date]
+        Target_RUL = HealthIndex[end_idx[0]]   
+                    
+        # Want to prioritize 0-1 transition examples in test dataset to test on real metric - shouldn't
+        # affect training since HealthIndex is linear everywhere.
+        if (end_date > removal_date):
+            if (random.random() > .5):
+                data_set = 'test'
+                Target_RUL = 1
+        
+        #Reshape pandas dataframe as numDays x numSignals ndarray for model purposes
+        feature_matrix = data_scaled.as_matrix()
+        feature_example = feature_matrix.flatten()
+        #feature_tensor = feature_matrix.reshape(1,feature_matrix.shape[1],feature_matrix.shape[0])
+         
+        #Add "image", target to tabular data structure
+        if (data_set == 'train'):     
+            Train_Inputs.append(feature_example)
+            Train_Targets.append(Target_RUL)
+        elif (data_set == 'valid'):
+            Valid_Inputs.append(feature_example)
+            Valid_Targets.append(Target_RUL)
+        else:
+            Test_Inputs.append(feature_example)
+            Test_Targets.append(Target_RUL)
+       
+        #update year
+        beg_date = beg_date + timedelta(days=shift_size)
+
+#Reformat as numpy array, shuffle, and combine into tuple
+Train_Inputs = np.array(Train_Inputs)
+Train_Targets = np.array(Train_Targets)
+Train_Inputs, Train_Targets = shuffle(Train_Inputs, Train_Targets)
+train_output = (Train_Inputs, Train_Targets)
+
+Valid_Inputs = np.array(Valid_Inputs )
+Valid_Targets = np.array(Valid_Targets)
+Valid_Inputs, Valid_Targets = shuffle(Valid_Inputs, Valid_Targets)
+valid_output = (Valid_Inputs , Valid_Targets)
+
+Test_Inputs = np.array(Test_Inputs)
+Test_Targets = np.array(Test_Targets)
+Test_Inputs, Test_Targets, = shuffle(Test_Inputs, Test_Targets)
+test_output = (Test_Inputs, Test_Targets)
+
+print(Train_Inputs.shape)
+print(len(Train_Targets))
+print(Test_Inputs.shape)
+print(len(Test_Targets))
+
+#Save off files of tabular data
+output_path = 'D:\\CNNFeatures2_Shift=7d_Cycle=30d_Tgt=Linear\\train_data'
+f = open(output_path,'wb')
+pickle.dump(train_output,f)
+f.close()
+
+output_path = 'D:\\CNNFeatures2_Shift=7d_Cycle=30d_Tgt=Linear\\valid_data'
+f = open(output_path,'wb')
+pickle.dump(valid_output,f)
+f.close()
+
+output_path = 'D:\\CNNFeatures2_Shift=7d_Cycle=30d_Tgt=Linear\\test_data'
+f = open(output_path,'wb')
+pickle.dump(test_output,f)
+f.close()

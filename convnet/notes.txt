@@ -1,0 +1,60 @@
+The structure of the CNN should be:
+
+=====
+INPUT
+=====
+
+1) Each example is a d x n x 1 matrix.
+
+- D = number of input planes (dimension of feature vector for a reading).
+- N = number of readings (365 if we are averaging per day).
+- 1 = dummy last dimension (viewing this as a N x 1 sequence, not a 2D block).
+
+The feature vector is the concatenation of all the sensors values. Numerical values are numerical, categorical features are 1-hot, binary features are binary.
+
+Continuous variable dimensions should be scaled to have 0 mean and unit variance!
+
+for i in continuous_dims:
+    X_norm(:,i) = (X(:,i) - mean(i)) / std(i)
+end
+
+2) For good training, all the examples are shuffled (random permutation, or random sampling).
+
+3) For efficient training the examples are grouped into batches. Therefore each batch will be a tensor of shape (batchSize, D, N, 1)
+
+=====
+MODEL
+=====
+
+1) conv2d layers with filter = D x fsize x 1. Can play around with different architectures... start with just one layer. If multiple layers then don't forget a ReLU, Tanh, sigmoid...
+2) conv2d layer with filter = D x 1 x 1 (look at each day individually). Maps from whatever shape is coming in from layer above to (batchSize, 1, N, 1)
+
+Different heads:
+1) Softmax layer to transform into probabilities for end index. So we'd be trying to minimize a negative log-likelihood class loss (where the class is a number between 1 and 365).
+
+2) Sigmoid layer to transform each of N indices into a probability. The target is trying to predict the entire 365 0/1 sequence. Minimizing mean squared error.
+
+3) This is a wild idea, but it might be cool to try:
+-> sigmoid to turn everything into a probability
+-> linear layer N x N
+-> softmax
+
+The idea here is that I'd want overall postion in the 365 long list to be taken into account. (e.g. hopefully all weights for the first few months go to zero).
+
+Let's see if any of this does anything at all.
+
+==========
+PARAMETERS
+==========
+
+* learning rate
+* filter size (This is the number of days to consider together at a time. The larger this gets, the slower).
+
+===============
+POST-PROCESSING
+===============
+
+Depending on the output type, we might want to run some smoothing algorithm. This could be something dumb (first smooth with a median window and then only take increasing values, otherwise plateau --> i.e. [0.0, 0.1, 0.05, 0.15] --> [0.0, 0.1, 0.1, 0.15]. We could also do something smart, like look into MRFs (Markov Random Field).
+
+
+
